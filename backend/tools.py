@@ -8,6 +8,7 @@ import ast
 import json
 import math
 import operator
+import os
 import re
 import traceback
 from datetime import datetime, timezone
@@ -31,7 +32,7 @@ except Exception:  # pragma: no cover
     def redact_secrets(text: str):
         return text
 
-WORKSPACE = Path("/home/user/aurora/workspace")
+WORKSPACE = Path(os.environ.get("AURORA_WORKSPACE", "/app/workspace"))
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 # Safe math operators for calculator
