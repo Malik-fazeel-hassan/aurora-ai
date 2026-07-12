@@ -51,6 +51,13 @@ AURORA_API_KEY=your_openrouter_or_openai_key
 docker compose up -d --build
 ```
 
+## DevSecOps
+
+Runtime: security headers, rate limits, SSRF guards, optional app token, audit log.  
+CI: gitleaks, pip-audit, bandit, trivy, smoke tests (`.github/workflows/devsecops.yml`).  
+
+See **[SECURITY.md](./SECURITY.md)** for full protocols.
+
 ## Security notes
 
 - Do **not** commit `data/settings.json` (contains API keys)

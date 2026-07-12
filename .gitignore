@@ -3,6 +3,7 @@ data/settings.json
 data/mcp_servers.json
 data/*.sqlite3
 data/*.db
+data/security_audit.jsonl
 .env
 .env.*
 !.env.example

@@ -11,6 +11,15 @@ from urllib.parse import urlparse
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+try:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from security import is_blocked_url
+except Exception:
+    def is_blocked_url(url: str):
+        return False, ""
+
 mcp = FastMCP("aurora-web-free")
 
 
@@ -62,6 +71,9 @@ def http_fetch(url: str, max_chars: int = 12000) -> str:
     u = (url or "").strip()
     if not u.startswith(("http://", "https://")):
         return json.dumps({"ok": False, "error": "only http/https"})
+    blocked, reason = is_blocked_url(u)
+    if blocked:
+        return json.dumps({"ok": False, "error": f"url blocked: {reason}"})
     host = urlparse(u).hostname or ""
     if host in {"localhost", "127.0.0.1", "0.0.0.0"} or host.endswith(".local"):
         return json.dumps({"ok": False, "error": "local URLs blocked"})

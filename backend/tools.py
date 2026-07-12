@@ -23,6 +23,14 @@ except Exception:  # pragma: no cover
     mcp_manager = None
     parse_qualified_name = None
 
+try:
+    from security import is_blocked_url, redact_secrets
+except Exception:  # pragma: no cover
+    def is_blocked_url(url: str):
+        return False, ""
+    def redact_secrets(text: str):
+        return text
+
 WORKSPACE = Path("/home/user/aurora/workspace")
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 
@@ -228,6 +236,9 @@ def tool_fetch_url(url: str, max_chars: int = 10000) -> dict[str, Any]:
     u = (url or "").strip()
     if not u.startswith(("http://", "https://")):
         return {"ok": False, "error": "only http/https URLs allowed"}
+    blocked, reason = is_blocked_url(u)
+    if blocked:
+        return {"ok": False, "error": f"url blocked: {reason}"}
     parsed = urlparse(u)
     if parsed.hostname in {"localhost", "127.0.0.1", "0.0.0.0"} or (parsed.hostname or "").endswith(".local"):
         return {"ok": False, "error": "local URLs blocked"}

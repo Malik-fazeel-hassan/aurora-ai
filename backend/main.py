@@ -38,6 +38,16 @@ from tools import (
 )
 from orchestration import Orchestrator, list_pipelines
 from mcp_manager import mcp_manager
+from security import (
+    CORS_ORIGINS,
+    SecurityHeadersMiddleware,
+    audit,
+    is_blocked_url,
+    redact_secrets,
+    sanitize_model_id,
+    security_status,
+    validate_chat_payload,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR.parent / "static"
@@ -181,7 +191,7 @@ def resolve_manual(settings: dict, model: Optional[str] = None, profile: Optiona
 
 app = FastAPI(
     title="Aurora",
-    version="2.5.0",
+    version="2.6.0",
     description="Claude-inspired agentic assistant with debate + modular orchestration",
 )
 @app.on_event("startup")
@@ -192,12 +202,18 @@ async def _startup_mcp():
         pass
 
 
+# DevSecOps middleware (headers, rate limit, body size, optional app token)
+app.add_middleware(SecurityHeadersMiddleware)
+
+_cors_origins = CORS_ORIGINS
+_cors_creds = False if _cors_origins == ["*"] else True
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_creds,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*", "X-Aurora-Token", "X-API-Key", "Authorization", "Content-Type", "X-Request-ID"],
+    expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "Retry-After"],
 )
 
 
@@ -449,7 +465,7 @@ async def health():
     return {
         "ok": True,
         "name": "Aurora",
-        "version": "2.5.0",
+        "version": "2.6.0",
         "time": time.time(),
         "api_key_set": bool(routes),
         "active_profile": s.get("active_profile"),
@@ -457,10 +473,16 @@ async def health():
         "routes_available": len(routes),
         "agent_tools": [t["function"]["name"] for t in TOOL_SPECS],
         "mcp_tools": [t["function"]["name"] for t in mcp_manager.connected_tool_specs()][:30],
-        "features": ["auto_route", "agent", "debate", "orchestration", "mcp", "failover"],
+        "features": ["auto_route", "agent", "debate", "orchestration", "mcp", "failover", "devsecops"],
         "pipelines": [p["id"] for p in list_pipelines()],
         "mcp": mcp_manager.status(),
+        "security": security_status(),
     }
+
+
+@app.get("/api/security/status")
+async def api_security_status():
+    return security_status()
 
 
 @app.get("/api/providers")
@@ -703,6 +725,16 @@ async def update_settings(body: SettingsUpdate):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
+    # DevSecOps input guards
+    err = validate_chat_payload(req.messages, req.max_tokens)
+    if err:
+        audit("chat_rejected", reason=err)
+        raise HTTPException(status_code=400, detail=err)
+    if req.model:
+        cleaned = sanitize_model_id(req.model)
+        if cleaned is None:
+            raise HTTPException(status_code=400, detail="invalid model id")
+        req.model = cleaned
     settings = load_settings()
     if req.profile:
         settings = {**settings, "active_profile": req.profile}

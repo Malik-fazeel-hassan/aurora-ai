@@ -1,0 +1,14 @@
+title = "Aurora gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow docs/examples"
+paths = [
+  '''FREE_MCP_CATALOG\.md''',
+  '''DEPLOY\.md''',
+  '''SECURITY\.md''',
+  '''data/.*\.example\.json''',
+  '''\.env\.example''',
+]

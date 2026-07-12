@@ -63,3 +63,23 @@ docker compose up -d --build
 - Put HTTPS in front (Railway/Render do this)
 - Rotate any keys that were ever pasted in chat
 - Keep `data/` volume private
+
+
+## DevSecOps (production)
+
+```bash
+export AURORA_SECURITY_ENABLED=true
+export AURORA_RATE_LIMIT=true
+export AURORA_CORS_ORIGINS=https://your.app
+export AURORA_REQUIRE_APP_TOKEN=true   # optional
+export AURORA_APP_TOKEN=...            # optional
+export AURORA_HSTS=true
+```
+
+Verify:
+
+```bash
+curl -s https://your.app/api/security/status | jq
+```
+
+Details: [SECURITY.md](./SECURITY.md)
