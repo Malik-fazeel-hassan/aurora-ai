@@ -239,10 +239,23 @@ def audit(event: str, **fields: Any) -> None:
 
 # ---------- Input validation ----------
 def validate_chat_payload(messages: list[Any], max_tokens: Optional[int] = None) -> Optional[str]:
+    # Check if infinite token mode is enabled in settings
+    settings_file = DATA_DIR / "settings.json"
+    infinite_token_mode = True
+    if settings_file.exists():
+        try:
+            data = json.loads(settings_file.read_text(encoding="utf-8"))
+            infinite_token_mode = data.get("infinite_token_mode", True)
+        except Exception:
+            pass
+
+    max_msg_chars = 2_000_000 if infinite_token_mode else MAX_MESSAGE_CHARS
+    max_messages = 500 if infinite_token_mode else MAX_MESSAGES
+
     if not isinstance(messages, list):
         return "messages must be a list"
-    if len(messages) > MAX_MESSAGES:
-        return f"too many messages (max {MAX_MESSAGES})"
+    if len(messages) > max_messages:
+        return f"too many messages (max {max_messages})"
     total = 0
     for m in messages:
         content = getattr(m, "content", None)
@@ -256,11 +269,11 @@ def validate_chat_payload(messages: list[Any], max_tokens: Optional[int] = None)
             except Exception:
                 content = str(content)
         total += len(content)
-        if len(content) > MAX_MESSAGE_CHARS:
-            return f"message too large (max {MAX_MESSAGE_CHARS} chars)"
-    if total > MAX_MESSAGE_CHARS * 2:
+        if len(content) > max_msg_chars:
+            return f"message too large (max {max_msg_chars} chars)"
+    if total > max_msg_chars * 2:
         return "conversation payload too large"
-    if max_tokens is not None and (max_tokens < 1 or max_tokens > 128_000):
+    if max_tokens is not None and (max_tokens < 1 or max_tokens > 256_000):
         return "max_tokens out of range"
     return None
 

@@ -325,7 +325,132 @@ def tool_python_eval(code: str) -> dict[str, Any]:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "trace": traceback.format_exc().splitlines()[-3:]}
 
 
+def tool_run_command(command: str) -> dict[str, Any]:
+    cmd = (command or "").strip()
+    if not cmd:
+        return {"ok": False, "error": "command is empty"}
+    try:
+        import subprocess
+        res = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=str(WORKSPACE),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            encoding="utf-8",
+            errors="replace"
+        )
+        return {
+            "ok": True,
+            "command": cmd,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "returncode": res.returncode
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Command timed out after 30 seconds."}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def tool_grep_search(query: str, directory: str = ".") -> dict[str, Any]:
+    q = (query or "").strip()
+    if not q:
+        return {"ok": False, "error": "query is empty"}
+    try:
+        path = _safe_workspace_path(directory)
+        results = []
+        for root, dirs, files in os.walk(str(path)):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__" and d != "node_modules" and d != ".git" and d != ".venv"]
+            for file in files:
+                file_path = Path(root) / file
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="ignore")
+                    lines = content.splitlines()
+                    for idx, line in enumerate(lines):
+                        if q.lower() in line.lower():
+                            results.append({
+                                "file": str(file_path.relative_to(WORKSPACE)),
+                                "line_number": idx + 1,
+                                "content": line.strip()
+                            })
+                            if len(results) >= 100:
+                                break
+                except Exception:
+                    continue
+                if len(results) >= 100:
+                    break
+            if len(results) >= 100:
+                break
+        return {"ok": True, "query": q, "results": results}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def tool_replace_file_content(path: str, target: str, replacement: str) -> dict[str, Any]:
+    try:
+        p = _safe_workspace_path(path)
+        if not p.is_file():
+            return {"ok": False, "error": "file not found"}
+        content = p.read_text(encoding="utf-8", errors="replace")
+        if target not in content:
+            return {"ok": False, "error": f"Target content not found in {path}"}
+        if content.count(target) > 1:
+            return {"ok": False, "error": f"Target content is not unique in {path} (found {content.count(target)} occurrences). Please specify more surrounding lines."}
+        new_content = content.replace(target, replacement, 1)
+        p.write_text(new_content, encoding="utf-8")
+        return {"ok": True, "path": path, "message": "Replacement applied successfully."}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 TOOL_SPECS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Execute a terminal shell command locally inside the workspace folder.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Terminal command to run (e.g. 'pytest', 'git diff', 'dir')"}
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_search",
+            "description": "Perform a recursive text search for a pattern in all files in the workspace (ripgrep equivalent).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Sub-string or pattern to find"},
+                    "directory": {"type": "string", "description": "Sub-directory to search", "default": "."}
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_file_content",
+            "description": "Replace a single unique block of lines in a workspace file (search-and-replace edit).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative file path"},
+                    "target": {"type": "string", "description": "Exact text block to find and replace"},
+                    "replacement": {"type": "string", "description": "New content to replace the target block with"}
+                },
+                "required": ["path", "target", "replacement"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -454,6 +579,9 @@ TOOL_IMPL: dict[str, Callable[..., dict[str, Any]]] = {
     "read_file": lambda **kw: tool_read_file(kw.get("path", ""), kw.get("max_chars", 12000)),
     "write_file": lambda **kw: tool_write_file(kw.get("path", ""), kw.get("content", "")),
     "get_time": lambda **kw: tool_get_time(kw.get("timezone_name", "UTC")),
+    "run_command": lambda **kw: tool_run_command(kw.get("command", "")),
+    "grep_search": lambda **kw: tool_grep_search(kw.get("query", ""), kw.get("directory", ".")),
+    "replace_file_content": lambda **kw: tool_replace_file_content(kw.get("path", ""), kw.get("target", ""), kw.get("replacement", "")),
 }
 
 

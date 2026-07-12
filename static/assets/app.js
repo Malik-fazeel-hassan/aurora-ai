@@ -24,6 +24,7 @@
     orchMode: localStorage.getItem("aurora.orch") === "1",
     pipeline: localStorage.getItem("aurora.pipeline") || "auto",
     activity: [],
+    attachments: [],
   };
 
   // ---------- Utils ----------
@@ -250,6 +251,7 @@
     renderMessages();
     updateStatus();
     updateModelLabel();
+    updateContextMonitor();
   }
 
   function renderChatList(filter = "") {
@@ -286,12 +288,27 @@
     box.innerHTML = chat.messages
       .map((m, idx) => {
         if (m.role === "user") {
+          let attsHtml = "";
+          if (m.attachments && m.attachments.length) {
+            attsHtml = `<div class="chat-attachments">` + m.attachments.map((a) => {
+              if (a.type === "image") {
+                return `<img class="chat-attached-image" src="${a.data}" alt="${escapeHtml(a.name)}" onclick="window.open(this.src)" style="cursor:zoom-in" />`;
+              } else {
+                return `
+                <div class="chat-attached-file">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+                  <span>${escapeHtml(a.name)}</span>
+                </div>`;
+              }
+            }).join("") + `</div>`;
+          }
           return `
           <div class="msg user" data-idx="${idx}">
             <div class="avatar">You</div>
             <div class="body">
               <div class="meta">You</div>
               <div class="content">${escapeHtml(m.content)}</div>
+              ${attsHtml}
             </div>
           </div>`;
         }
@@ -497,14 +514,12 @@
     let chat = activeChat();
     if (!chat) chat = createChat();
 
-    // Attach any pending file context
-    const pending = sendMessage._attach;
-    if (pending) {
-      text = `${text}\n\n---\nAttached file \`${pending.name}\`:\n\`\`\`\n${pending.content.slice(0, 40000)}\n\`\`\``;
-      sendMessage._attach = null;
-    }
+    // Attach current attachments if any
+    const attachments = state.attachments ? [...state.attachments] : [];
+    state.attachments = [];
+    renderAttachments();
 
-    chat.messages.push({ role: "user", content: text });
+    chat.messages.push({ role: "user", content: text, attachments: attachments });
     autoTitle(chat, text);
     chat.model = state.selectedModel;
     chat.updatedAt = now();
@@ -517,7 +532,31 @@
     const payloadMessages = chat.messages
       .filter((m) => m.role === "user" || m.role === "assistant")
       .slice(0, -1) // exclude empty streaming assistant
-      .map((m) => ({ role: m.role, content: m.content }));
+      .map((m) => {
+        let item = { role: m.role };
+        if (m.attachments && m.attachments.some(a => a.type === "image")) {
+          const content = [{ type: "text", text: m.content || "" }];
+          for (const a of m.attachments) {
+            if (a.type === "image") {
+              content.push({ type: "image_url", image_url: { url: a.data } });
+            } else if (a.type === "text") {
+              content.push({ type: "text", text: `\n\n[Attached File: ${a.name}]\n${a.text}` });
+            }
+          }
+          item.content = content;
+        } else if (m.attachments && m.attachments.some(a => a.type === "text")) {
+          let txt = m.content || "";
+          for (const a of m.attachments) {
+            if (a.type === "text") {
+              txt += `\n\n[Attached File: ${a.name}]\n${a.text}`;
+            }
+          }
+          item.content = txt;
+        } else {
+          item.content = m.content || "";
+        }
+        return item;
+      });
 
     const controller = new AbortController();
     state.abort = controller;
@@ -575,6 +614,22 @@
             // Aurora control events (routing / agent tools)
             if (json.aurora_event) {
               const ev = json.aurora_event;
+              if (ev === "tool_approval_required") {
+                pushApprovalRequest(json.approval_id, json.name, json.arguments);
+                continue;
+              }
+              if (ev === "context_compressed") {
+                pushActivity("orch", `✨ Context compressed! Saved ${Math.round((1 - json.compressed_len/json.original_len)*100)}% tokens`);
+                toast("✨ Infinite Context: Compressed older history to save tokens.");
+                chat.compressedStats = {
+                  original: json.original_len,
+                  compressed: json.compressed_len,
+                  strategy: json.strategy,
+                  summary: json.summary
+                };
+                updateContextMonitor();
+                continue;
+              }
               if (ev === "route_plan") {
                 const names = (json.candidates || []).map((c) => c.label || c.model).slice(0, 4).join(" → ");
                 pushActivity("ok", `Task: ${json.task || "chat"} · candidates: ${names || "…"}`);
@@ -859,6 +914,15 @@
     if (pf) pf.checked = s.prefer_free_on_fail !== false;
     const as = $("#set-agent-steps");
     if (as) as.value = s.agent_max_steps ?? 8;
+    
+    const infMode = $("#set-infinite-mode");
+    if (infMode) infMode.checked = s.infinite_token_mode !== false;
+    const infThreshold = $("#set-infinite-threshold");
+    if (infThreshold) infThreshold.value = s.infinite_token_threshold ?? 40000;
+    const infStrategy = $("#set-infinite-strategy");
+    if (infStrategy) infStrategy.value = s.infinite_token_strategy ?? "summarize";
+    const reqApp = $("#set-require-approvals");
+    if (reqApp) reqApp.checked = s.require_tool_approvals !== false;
     fillModelSelect(provider, s.default_model || state.selectedModel);
     // ensure Auto option exists
     const sel = $("#set-model");
@@ -900,6 +964,15 @@
     if (pf) body.prefer_free_on_fail = !!pf.checked;
     const as = $("#set-agent-steps");
     if (as) body.agent_max_steps = parseInt(as.value, 10) || 8;
+    
+    const infMode = $("#set-infinite-mode");
+    if (infMode) body.infinite_token_mode = !!infMode.checked;
+    const infThreshold = $("#set-infinite-threshold");
+    if (infThreshold) body.infinite_token_threshold = parseInt(infThreshold.value, 10) || 40000;
+    const infStrategy = $("#set-infinite-strategy");
+    if (infStrategy) body.infinite_token_strategy = infStrategy.value;
+    const reqApp = $("#set-require-approvals");
+    if (reqApp) body.require_tool_approvals = !!reqApp.checked;
     const profileEl = $("#set-profile");
     if (profileEl && profileEl.value) body.active_profile = profileEl.value;
     const key = $("#set-api-key").value.trim();
@@ -1448,11 +1521,49 @@
 
     $("#btn-attach").addEventListener("click", () => $("#file-input").click());
     $("#file-input").addEventListener("change", async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      const content = await file.text();
-      sendMessage._attach = { name: file.name, content };
-      toast(`Attached ${file.name}`);
+      const files = e.target.files;
+      if (!files || !files.length) return;
+      
+      if (!state.attachments) state.attachments = [];
+      
+      for (const file of files) {
+        if (file.type.startsWith("image/")) {
+          const reader = new FileReader();
+          const base64Promise = new Promise((resolve) => {
+            reader.onload = () => resolve(reader.result);
+          });
+          reader.readAsDataURL(file);
+          const base64Data = await base64Promise;
+          state.attachments.push({
+            type: "image",
+            name: file.name,
+            data: base64Data
+          });
+          toast(`Attached image ${file.name}`);
+        } else {
+          // Check for binary file extensions to prevent raw bytes corruption
+          const ext = file.name.split(".").pop().toLowerCase();
+          const binaryExtensions = ["pdf", "pptx", "docx", "xlsx", "xls", "doc", "zip", "tar", "gz", "7z", "rar", "exe", "dll", "so", "bin"];
+          if (binaryExtensions.includes(ext)) {
+            toast(`⚠️ Binary file "${file.name}" is not supported. Please upload plain text (.txt, .md, .py, etc.) or images.`, 6000);
+            continue;
+          }
+
+          const textPromise = new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.readAsText(file);
+          });
+          const textContent = await textPromise;
+          state.attachments.push({
+            type: "text",
+            name: file.name,
+            text: textContent
+          });
+          toast(`Attached file ${file.name}`);
+        }
+      }
+      renderAttachments();
       e.target.value = "";
     });
 
@@ -1500,6 +1611,130 @@
     const el = $("#input");
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
+  }
+
+  function renderAttachments() {
+    const box = $("#composer-attachments");
+    if (!box) return;
+    if (!state.attachments || !state.attachments.length) {
+      box.hidden = true;
+      box.innerHTML = "";
+      return;
+    }
+    box.hidden = false;
+    box.innerHTML = state.attachments.map((a, idx) => {
+      if (a.type === "image") {
+        return `
+        <div class="attachment-preview">
+          <img src="${a.data}" alt="${escapeHtml(a.name)}" />
+          <button type="button" class="btn-remove" data-remove-idx="${idx}" aria-label="Remove">×</button>
+        </div>`;
+      } else {
+        return `
+        <div class="attachment-preview">
+          <div class="file-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+            <span style="font-size:0.6rem; margin-top:2px; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; width:100%">${escapeHtml(a.name)}</span>
+          </div>
+          <button type="button" class="btn-remove" data-remove-idx="${idx}" aria-label="Remove">×</button>
+        </div>`;
+      }
+    }).join("");
+    
+    // Add remove listeners
+    $$("#composer-attachments .btn-remove").forEach((b) => {
+      b.addEventListener("click", (e) => {
+        const idx = parseInt(b.dataset.removeIdx, 10);
+        state.attachments.splice(idx, 1);
+        renderAttachments();
+      });
+    });
+  }
+
+  function updateContextMonitor() {
+    const monitor = $("#context-monitor");
+    const label = $("#context-size-text");
+    if (!monitor || !label) return;
+    const chat = activeChat();
+    if (!chat || !chat.messages || !chat.messages.length) {
+      monitor.hidden = true;
+      return;
+    }
+    
+    monitor.hidden = false;
+    
+    // Calculate total character size
+    let total_chars = 0;
+    for (const m of chat.messages) {
+      total_chars += (m.content || "").length;
+      if (m.attachments) {
+        for (const a of m.attachments) {
+          if (a.data) total_chars += a.data.length;
+          if (a.text) total_chars += a.text.length;
+        }
+      }
+    }
+    
+    if (chat.compressedStats) {
+      const orig = chat.compressedStats.original;
+      const comp = chat.compressedStats.compressed;
+      const saved = Math.round((1 - comp / orig) * 100);
+      label.textContent = `${Math.round(comp / 100) / 10}k chars (${saved}% saved)`;
+      monitor.classList.add("compressed");
+    } else {
+      label.textContent = `${Math.round(total_chars / 100) / 10}k chars`;
+      monitor.classList.remove("compressed");
+    }
+  }
+
+  function pushApprovalRequest(approval_id, name, args) {
+    const el = $("#activity");
+    if (!el) return;
+    el.hidden = false;
+    
+    const card = document.createElement("div");
+    card.className = "activity-line tool-approval-card";
+    card.innerHTML = `
+      <span class="tag warning">approve</span>
+      <div class="approval-details">
+        <strong>Tool requires approval:</strong> <code class="tool-name">${escapeHtml(name)}</code>
+        <pre class="tool-args">${escapeHtml(args)}</pre>
+        <div class="approval-actions" id="actions-${approval_id}">
+          <button type="button" class="btn-approve-tool" data-approve="${approval_id}">Approve</button>
+          <button type="button" class="btn-reject-tool danger" data-reject="${approval_id}">Reject</button>
+        </div>
+      </div>
+    `;
+    el.appendChild(card);
+    el.scrollTop = el.scrollHeight;
+    
+    const approveBtn = card.querySelector(`[data-approve="${approval_id}"]`);
+    const rejectBtn = card.querySelector(`[data-reject="${approval_id}"]`);
+    
+    approveBtn.addEventListener("click", async () => {
+      disableApprovalActions(approval_id, "Approved");
+      try {
+        await apiPost(`/api/approve/${approval_id}?approved=true`);
+      } catch (e) {
+        toast("Failed to approve tool: " + e.message);
+      }
+    });
+    
+    rejectBtn.addEventListener("click", async () => {
+      disableApprovalActions(approval_id, "Rejected");
+      try {
+        await apiPost(`/api/approve/${approval_id}?approved=false`);
+      } catch (e) {
+        toast("Failed to reject tool: " + e.message);
+      }
+    });
+  }
+
+  function disableApprovalActions(approval_id, status) {
+    const container = document.getElementById(`actions-${approval_id}`);
+    if (container) {
+      container.innerHTML = `<span class="approval-status">${status}</span>`;
+    }
   }
 
   // ---------- Boot ----------

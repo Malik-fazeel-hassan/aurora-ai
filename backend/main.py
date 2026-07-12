@@ -77,9 +77,21 @@ DEFAULT_SETTINGS = {
     "auto_route": True,
     "prefer_free_on_fail": True,
     "agent_max_steps": 8,
+    "infinite_token_mode": True,
+    "infinite_token_threshold": 40000,
+    "infinite_token_strategy": "summarize",
 }
 
 PROVIDERS = {
+    "local": {
+        "name": "Local AI Models (Offline)",
+        "base": "local",
+        "models": [
+            {"id": "local/nano-banana-chat", "label": "Nano Banana Chat (Local LLM)"},
+            {"id": "local/nano-banana-image", "label": "Nano Banana Image (Local T2I)"},
+            {"id": "local/seadance-video", "label": "SeaDance Video (Local T2V)"},
+        ],
+    },
     "openrouter": {
         "name": "OpenRouter",
         "base": "https://openrouter.ai/api/v1",
@@ -220,6 +232,7 @@ app.add_middleware(
 class ChatMessage(BaseModel):
     role: str
     content: Any = ""
+    attachments: Optional[list[dict]] = None
 
 
 class ChatRequest(BaseModel):
@@ -249,6 +262,10 @@ class SettingsUpdate(BaseModel):
     auto_route: Optional[bool] = None
     prefer_free_on_fail: Optional[bool] = None
     agent_max_steps: Optional[int] = None
+    infinite_token_mode: Optional[bool] = None
+    infinite_token_threshold: Optional[int] = None
+    infinite_token_strategy: Optional[str] = None
+    require_tool_approvals: Optional[bool] = None
 
 
 def sse(obj: dict | str) -> str:
@@ -292,7 +309,34 @@ def normalize_messages(messages: list[ChatMessage], system: str) -> list[dict[st
     for m in messages:
         if m.role not in ("user", "assistant", "system", "tool"):
             continue
-        item: dict[str, Any] = {"role": m.role, "content": m.content if m.content is not None else ""}
+        content = m.content if m.content is not None else ""
+        
+        # Check if the user message has attachments (multimodal context)
+        if m.role == "user" and m.attachments:
+            has_image = any(a.get("type") == "image" for a in m.attachments)
+            if has_image:
+                content_blocks = [{"type": "text", "text": str(content)}]
+                for a in m.attachments:
+                    if a.get("type") == "image":
+                        content_blocks.append({
+                            "type": "image_url",
+                            "image_url": {"url": a.get("data")}
+                        })
+                    elif a.get("type") == "text":
+                        content_blocks.append({
+                            "type": "text",
+                            "text": f"\n\n[Attached File: {a.get('name')}]\n{a.get('text')}"
+                        })
+                item = {"role": m.role, "content": content_blocks}
+            else:
+                text_content = str(content)
+                for a in m.attachments:
+                    if a.get("type") == "text":
+                        text_content += f"\n\n[Attached File: {a.get('name')}]\n{a.get('text')}"
+                item = {"role": m.role, "content": text_content}
+        else:
+            item = {"role": m.role, "content": content}
+            
         out.append(item)
     return out
 
@@ -685,6 +729,9 @@ async def get_settings():
         "agent_max_steps": s.get("agent_max_steps", 8),
         "profiles_configured": list((s.get("profiles") or {}).keys()),
         "routes_available": len(routes),
+        "infinite_token_mode": s.get("infinite_token_mode", True),
+        "infinite_token_threshold": s.get("infinite_token_threshold", 40000),
+        "infinite_token_strategy": s.get("infinite_token_strategy", "summarize"),
     }
 
 
@@ -723,6 +770,91 @@ async def update_settings(body: SettingsUpdate):
     return await get_settings()
 
 
+# Global tool approval queue
+pending_approvals: dict[str, asyncio.Event] = {}
+approval_results: dict[str, bool] = {}
+
+
+@app.post("/api/approve/{approval_id}")
+async def approve_tool(approval_id: str, approved: bool = True):
+    if approval_id in pending_approvals:
+        approval_results[approval_id] = approved
+        pending_approvals[approval_id].set()
+        return {"status": "ok", "approval_id": approval_id, "approved": approved}
+    raise HTTPException(status_code=404, detail="Approval request not found or already processed.")
+
+
+async def compress_conversation(messages: list[dict], threshold: int, strategy: str, routes: list, settings: dict) -> tuple[list[dict], bool, int, int, str]:
+    """
+    Compresses conversation history if total character length exceeds threshold.
+    Returns (compressed_messages, did_compress, original_len, compressed_len, summary_text)
+    """
+    total_len = sum(len(str(m.get("content") or "")) for m in messages)
+    if total_len <= threshold or len(messages) <= 10:
+        return messages, False, total_len, total_len, ""
+
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    non_system = [m for m in messages if m.get("role") != "system"]
+    
+    if len(non_system) <= 6:
+        return messages, False, total_len, total_len, ""
+        
+    first_user = non_system[0]
+    keep_n = 8
+    last_turns = non_system[-keep_n:]
+    middle_turns = non_system[1:-keep_n]
+    
+    if not middle_turns:
+        return messages, False, total_len, total_len, ""
+        
+    middle_len = sum(len(str(m.get("content") or "")) for m in middle_turns)
+    if middle_len < 1000:
+        return messages, False, total_len, total_len, ""
+
+    summary = ""
+    compressed_strategy = strategy
+    
+    if strategy == "summarize" and routes:
+        transcript_lines = []
+        for m in middle_turns:
+            role = "User" if m.get("role") == "user" else "Assistant"
+            content = str(m.get("content") or "")
+            transcript_lines.append(f"{role}: {content[:1000]}")
+            
+        transcript = "\n".join(transcript_lines)
+        sum_prompt = (
+            "Summarize the following conversation history between User and Assistant concisely. "
+            "Highlight key facts, preferences, code developed, and decisions made. Keep the summary "
+            "under 400 words. Do not repeat instructions. Return ONLY the summary.\n\n"
+            f"Transcript to summarize:\n{transcript}"
+        )
+        
+        sum_messages = [{"role": "user", "content": sum_prompt}]
+        try:
+            content, route, err = await complete_with_failover(routes, sum_messages, 0.3, 1024)
+            if content and content.strip():
+                summary = content.strip()
+        except Exception:
+            pass
+            
+    if not summary:
+        compressed_strategy = "prune"
+        summary = f"Pruned {len(middle_turns)} turns of older discussion to save token space."
+
+    compressed_messages = []
+    compressed_messages.extend(system_msgs)
+    compressed_messages.append(first_user)
+    marker_content = (
+        f"[System Note: The preceding conversation history has been auto-compressed using '{compressed_strategy}' "
+        f"to fit in the model context. Summary of past discussion:\n{summary}]"
+    )
+    compressed_messages.append({"role": "system", "content": marker_content})
+    compressed_messages.extend(last_turns)
+    
+    new_len = sum(len(str(m.get("content") or "")) for m in compressed_messages)
+    return compressed_messages, True, total_len, new_len, summary
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     # DevSecOps input guards
@@ -755,6 +887,67 @@ async def chat(req: ChatRequest):
     if req.agent_mode:
         system = system + "\n\n" + AGENT_SYSTEM_EXTRA + "\n\n" + TOOL_FALLBACK_INSTRUCTIONS
 
+    # Intercept Local Offline Models
+    if model_req.startswith("local/"):
+        import local_models
+        if model_req == "local/nano-banana-chat":
+            if req.stream:
+                async def local_chat_streamer():
+                    yield sse({"aurora_event": "route_selected", "profile": "local", "model": model_req, "label": "Nano Banana Chat (Local LLM)", "tier": "local"})
+                    async for token in local_models.generate_local_text_stream(normalize_messages(req.messages, system), settings):
+                        yield sse(event_chunk(token, model=model_req))
+                    yield sse(event_done(model=model_req))
+                    yield sse("[DONE]")
+                return StreamingResponse(local_chat_streamer(), media_type="text/event-stream")
+            else:
+                content_list = []
+                async for token in local_models.generate_local_text_stream(normalize_messages(req.messages, system), settings):
+                    content_list.append(token)
+                full_text = "".join(content_list)
+                return {
+                    "id": f"local-{uuid.uuid4().hex[:8]}",
+                    "model": model_req,
+                    "choices": [{"message": {"role": "assistant", "content": full_text}}],
+                }
+        elif model_req == "local/nano-banana-image":
+            prompt = last_user_text(req.messages)
+            url = local_models.generate_local_image(prompt)
+            content = f"Here is your generated image:\n\n![Generated Image]({url})\n\n*(Prompt: {prompt})*"
+            if req.stream:
+                async def local_image_streamer():
+                    yield sse({"aurora_event": "route_selected", "profile": "local", "model": model_req, "label": "Nano Banana Image (Local T2I)", "tier": "local"})
+                    for i in range(0, len(content), 15):
+                        yield sse(event_chunk(content[i:i+15], model=model_req))
+                        await asyncio.sleep(0.005)
+                    yield sse(event_done(model=model_req))
+                    yield sse("[DONE]")
+                return StreamingResponse(local_image_streamer(), media_type="text/event-stream")
+            else:
+                return {
+                    "id": f"local-{uuid.uuid4().hex[:8]}",
+                    "model": model_req,
+                    "choices": [{"message": {"role": "assistant", "content": content}}],
+                }
+        elif model_req == "local/seadance-video":
+            prompt = last_user_text(req.messages)
+            url = local_models.generate_local_video(prompt)
+            content = f"Here is your generated video:\n\n<video src=\"{url}\" controls autoplay loop style=\"max-width:100%; width: 500px; border-radius: 12px; border: 1px solid var(--border);\"></video>\n\n*(Prompt: {prompt})*"
+            if req.stream:
+                async def local_video_streamer():
+                    yield sse({"aurora_event": "route_selected", "profile": "local", "model": model_req, "label": "SeaDance Video (Local T2V)", "tier": "local"})
+                    for i in range(0, len(content), 15):
+                        yield sse(event_chunk(content[i:i+15], model=model_req))
+                        await asyncio.sleep(0.005)
+                    yield sse(event_done(model=model_req))
+                    yield sse("[DONE]")
+                return StreamingResponse(local_video_streamer(), media_type="text/event-stream")
+            else:
+                return {
+                    "id": f"local-{uuid.uuid4().hex[:8]}",
+                    "model": model_req,
+                    "choices": [{"message": {"role": "assistant", "content": content}}],
+                }
+
     # Build route list
     if auto or model_req == "auto":
         routes = build_routes(settings, task=task, prefer_free=False)
@@ -779,10 +972,8 @@ async def chat(req: ChatRequest):
                 )
             ]
         failover = build_routes(settings, task=task, prefer_free=False)
-        # put free routes at end if enabled
         if settings.get("prefer_free_on_fail", True):
             failover = failover + [r for r in build_routes(settings, task=task, prefer_free=True) if r.tier == "free"]
-        # merge unique
         seen = set()
         routes = []
         for r in primary + failover:
@@ -801,65 +992,125 @@ async def chat(req: ChatRequest):
             "choices": [{"message": {"role": "assistant", "content": "No API routes configured."}}],
         }
 
+    # 2. Compress conversation if infinite token mode is enabled
+    inf_mode = settings.get("infinite_token_mode", True)
+    inf_threshold = settings.get("infinite_token_threshold", 40000)
+    inf_strategy = settings.get("infinite_token_strategy", "summarize")
+    
+    did_compress = False
+    original_len = 0
+    compressed_len = 0
+    summary_text = ""
+    
+    msg_dicts = [{"role": m.role, "content": m.content} for m in req.messages]
+    
+    if inf_mode:
+        compressed_msgs, did_compress, original_len, compressed_len, summary_text = await compress_conversation(
+            msg_dicts, inf_threshold, inf_strategy, routes, settings
+        )
+        if did_compress:
+            req.messages = [ChatMessage(role=m["role"], content=m["content"]) for m in compressed_msgs]
+
     messages = normalize_messages(req.messages, system)
+
+    # Helper to return StreamingResponse with injected compression event
+    def make_stream_response(generator):
+        if did_compress:
+            async def compression_stream_wrapper():
+                yield sse({
+                    "aurora_event": "context_compressed",
+                    "original_len": original_len,
+                    "compressed_len": compressed_len,
+                    "strategy": inf_strategy,
+                    "summary": summary_text
+                })
+                async for chunk in generator:
+                    yield chunk
+            return StreamingResponse(
+                compression_stream_wrapper(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+            )
+        else:
+            return StreamingResponse(
+                generator,
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+            )
 
     # Orchestration (multi-module pipelines)
     if req.orchestrate:
         pipeline_id = (req.pipeline or "auto").strip().lower()
         if req.stream:
-            return StreamingResponse(
-                orchestrate_stream(routes, messages, temperature, max_tokens, settings, task, pipeline_id),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            return make_stream_response(
+                orchestrate_stream(routes, messages, temperature, max_tokens, settings, task, pipeline_id)
             )
         final_text, used, meta = await orchestrate_run(
             routes, messages, temperature, max_tokens, settings, pipeline_id
         )
-        return {
+        res = {
             "id": f"orch-{uuid.uuid4().hex[:8]}",
             "model": used,
             "choices": [{"message": {"role": "assistant", "content": final_text}}],
             "aurora_orchestration": meta,
         }
+        if did_compress:
+            res["aurora_context"] = {
+                "compressed": True,
+                "original_len": original_len,
+                "compressed_len": compressed_len,
+                "summary": summary_text
+            }
+        return res
 
-    # Debate takes priority over agent when both are set (clearer UX)
+    # Debate
     if req.debate_mode:
         panel_n = max(2, min(int(req.debate_panel or settings.get("debate_panel") or 3), 5))
         if req.stream:
-            return StreamingResponse(
-                debate_stream(routes, messages, temperature, max_tokens, settings, task, panel_n),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            return make_stream_response(
+                debate_stream(routes, messages, temperature, max_tokens, settings, task, panel_n)
             )
         final_text, used, panel = await debate_run(routes, messages, temperature, max_tokens, settings, panel_n)
-        return {
+        res = {
             "id": f"debate-{uuid.uuid4().hex[:8]}",
             "model": used,
             "choices": [{"message": {"role": "assistant", "content": final_text}}],
             "aurora_debate": panel,
         }
+        if did_compress:
+            res["aurora_context"] = {
+                "compressed": True,
+                "original_len": original_len,
+                "compressed_len": compressed_len,
+                "summary": summary_text
+            }
+        return res
 
+    # Agent
     if req.agent_mode:
         if req.stream:
-            return StreamingResponse(
-                agent_stream(routes, messages, temperature, max_tokens, settings, task),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            return make_stream_response(
+                agent_stream(routes, messages, temperature, max_tokens, settings, task)
             )
-        # non-stream agent
         final_text, used = await agent_run(routes, messages, temperature, max_tokens, settings)
-        return {
+        res = {
             "id": f"agent-{uuid.uuid4().hex[:8]}",
             "model": used,
             "choices": [{"message": {"role": "assistant", "content": final_text}}],
         }
+        if did_compress:
+            res["aurora_context"] = {
+                "compressed": True,
+                "original_len": original_len,
+                "compressed_len": compressed_len,
+                "summary": summary_text
+            }
+        return res
 
-    # Normal chat (with optional streaming + failover)
+    # Normal chat
     if req.stream:
-        return StreamingResponse(
-            chat_stream_with_failover(routes, messages, temperature, max_tokens, task, settings),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        return make_stream_response(
+            chat_stream_with_failover(routes, messages, temperature, max_tokens, task, settings)
         )
 
     # non-stream failover
@@ -869,14 +1120,19 @@ async def chat(req: ChatRequest):
             r.api_base, r.api_key, r.model, messages, temperature, max_tokens
         )
         if data:
-            # annotate
             if "model" not in data:
                 data["model"] = r.model
             data["aurora_route"] = {"profile": r.profile, "model": r.model, "label": r.label, "task": task}
+            if did_compress:
+                data["aurora_context"] = {
+                    "compressed": True,
+                    "original_len": original_len,
+                    "compressed_len": compressed_len,
+                    "summary": summary_text
+                }
             return data
         errors.append(f"{r.label}: HTTP {status} {err[:180]}")
         if not is_retriable_error(status, err):
-            # still try next for resilience
             continue
     raise HTTPException(status_code=502, detail={"message": "All routes failed", "errors": errors[:8]})
 
@@ -1545,7 +1801,13 @@ async def agent_run(routes, messages, temperature, max_tokens, settings) -> tupl
                 fn = call.get("function") or {}
                 name = fn.get("name") or ""
                 raw_args = fn.get("arguments") or "{}"
-                result = await run_tool_async(name, raw_args)
+                
+                dangerous_tools = {"run_command", "write_file", "replace_file_content"}
+                require_approvals = settings.get("require_tool_approvals", True)
+                if name in dangerous_tools and require_approvals:
+                    result = {"ok": False, "error": "Tool execution blocked. Approvals are required, but this request was sent in non-streaming mode."}
+                else:
+                    result = await run_tool_async(name, raw_args)
                 working.append(
                     {
                         "role": "tool",
@@ -1563,7 +1825,13 @@ async def agent_run(routes, messages, temperature, max_tokens, settings) -> tupl
             for call in xml_calls:
                 fn = call.get("function") or {}
                 name = fn.get("name") or ""
-                result = await run_tool_async(name, fn.get("arguments"))
+                
+                dangerous_tools = {"run_command", "write_file", "replace_file_content"}
+                require_approvals = settings.get("require_tool_approvals", True)
+                if name in dangerous_tools and require_approvals:
+                    result = {"ok": False, "error": "Tool execution blocked. Approvals are required, but this request was sent in non-streaming mode."}
+                else:
+                    result = await run_tool_async(name, fn.get("arguments"))
                 working.append(
                     {
                         "role": "user",
@@ -1688,7 +1956,36 @@ async def agent_stream(
                     "step": step + 1,
                 }
             )
-            result = await run_tool_async(name, raw_args)
+            dangerous_tools = {"run_command", "write_file", "replace_file_content"}
+            require_approvals = settings.get("require_tool_approvals", True)
+            
+            if name in dangerous_tools and require_approvals:
+                approval_id = str(uuid.uuid4())
+                event = asyncio.Event()
+                pending_approvals[approval_id] = event
+                
+                yield sse({
+                    "aurora_event": "tool_approval_required",
+                    "approval_id": approval_id,
+                    "name": name,
+                    "arguments": raw_args if isinstance(raw_args, str) else json.dumps(raw_args),
+                    "step": step + 1
+                })
+                
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=300.0)
+                except asyncio.TimeoutExpired:
+                    pending_approvals.pop(approval_id, None)
+                    result = {"ok": False, "error": "Tool execution timed out waiting for approval."}
+                else:
+                    pending_approvals.pop(approval_id, None)
+                    approved = approval_results.pop(approval_id, False)
+                    if not approved:
+                        result = {"ok": False, "error": "Tool execution rejected by user."}
+                    else:
+                        result = await run_tool_async(name, raw_args)
+            else:
+                result = await run_tool_async(name, raw_args)
             # compact preview for UI
             preview = json.dumps(result, ensure_ascii=False)
             if len(preview) > 500:
