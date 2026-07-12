@@ -401,6 +401,15 @@ async def try_completion(
         async with httpx.AsyncClient(timeout=180.0) as client:
             r = await client.post(url, headers=headers, json=payload)
             if r.status_code >= 400:
+                import re
+                match = re.search(r"can only afford (\d+)", r.text, re.IGNORECASE)
+                if match:
+                    afford_limit = int(match.group(1))
+                    reduced_max_tokens = max(16, afford_limit - 10)
+                    if reduced_max_tokens < max_tokens:
+                        return await try_completion(
+                            api_base, api_key, model, messages, temperature, reduced_max_tokens, tools, tool_choice
+                        )
                 return None, r.status_code, r.text
             return r.json(), r.status_code, ""
     except Exception as e:
@@ -436,6 +445,17 @@ async def stream_completion_lines(
             async with client.stream("POST", url, headers=headers, json=payload) as r:
                 if r.status_code >= 400:
                     body = (await r.aread()).decode("utf-8", errors="replace")
+                    import re
+                    match = re.search(r"can only afford (\d+)", body, re.IGNORECASE)
+                    if match:
+                        afford_limit = int(match.group(1))
+                        reduced_max_tokens = max(16, afford_limit - 10)
+                        if reduced_max_tokens < max_tokens:
+                            async for kind, status, text in stream_completion_lines(
+                                api_base, api_key, model, messages, temperature, reduced_max_tokens
+                            ):
+                                yield (kind, status, text)
+                            return
                     yield ("error", r.status_code, body)
                     return
                 async for line in r.aiter_lines():
@@ -951,8 +971,12 @@ async def chat(req: ChatRequest):
     # Build route list
     if auto or model_req == "auto":
         routes = build_routes(settings, task=task, prefer_free=False)
-        if not routes and settings.get("prefer_free_on_fail", True):
-            routes = build_routes(settings, task=task, prefer_free=True)
+        if settings.get("prefer_free_on_fail", True):
+            free_routes = build_routes(settings, task=task, prefer_free=True)
+            seen_r = {(r.profile, r.model) for r in routes}
+            for fr in free_routes:
+                if (fr.profile, fr.model) not in seen_r:
+                    routes.append(fr)
     else:
         # Manual model: still attach failover chain after primary
         api_base, api_key, model = resolve_manual(settings, model_req, req.profile)
