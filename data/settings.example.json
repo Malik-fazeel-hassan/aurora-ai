@@ -1,0 +1,19 @@
+{
+  "api_base": "https://openrouter.ai/api/v1",
+  "api_key": "",
+  "default_model": "auto",
+  "system_prompt": "You are Aurora, a helpful AI assistant.",
+  "temperature": 0.7,
+  "max_tokens": 8192,
+  "active_profile": "openrouter",
+  "auto_route": true,
+  "prefer_free_on_fail": true,
+  "agent_max_steps": 8,
+  "profiles": {
+    "openrouter": {
+      "api_base": "https://openrouter.ai/api/v1",
+      "api_key": "",
+      "default_model": "anthropic/claude-sonnet-4.6"
+    }
+  }
+}

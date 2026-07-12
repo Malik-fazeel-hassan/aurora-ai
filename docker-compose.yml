@@ -1,0 +1,20 @@
+services:
+  aurora:
+    build: .
+    image: aurora-ai:latest
+    ports:
+      - "${PORT:-7860}:7860"
+    environment:
+      - PORT=7860
+      - HOST=0.0.0.0
+      - AURORA_API_KEY=${AURORA_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      # Persist settings, MCP config, knowledge DB, workspace
+      - aurora-data:/app/data
+      - aurora-workspace:/app/workspace
+    restart: unless-stopped
+
+volumes:
+  aurora-data:
+  aurora-workspace:

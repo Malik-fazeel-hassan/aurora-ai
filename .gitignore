@@ -1,0 +1,40 @@
+# secrets & runtime data
+data/settings.json
+data/mcp_servers.json
+data/*.sqlite3
+data/*.db
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# node (if any)
+node_modules/
+.npm/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# logs / local workspace junk
+*.log
+tmp/
+.cache/
+workspace/**
+!workspace/README.md
+
+# build
+dist/
+build/
+.arena/
