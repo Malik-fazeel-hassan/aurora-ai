@@ -684,10 +684,61 @@
   }
 
   function setStreaming(on) {
-    state.streaming = on;
-    $("#stop-row").hidden = !on;
-    $("#btn-send").disabled = on || !$("#input").value.trim();
-    $("#input").disabled = on;
+    state.streaming = !!on;
+    const stopRow = $("#stop-row");
+    if (stopRow) stopRow.hidden = !on;
+    const send = $("#btn-send");
+    const input = $("#input");
+    if (send) send.disabled = on || !(input && input.value.trim());
+    // Keep input usable so UI never feels fully frozen; only block double-send via state.streaming
+    if (input) input.disabled = false;
+    if (!on) {
+      state.abort = null;
+      clearTimeout(setStreaming._safetyTimer);
+    } else {
+      // Safety unlock after 3 minutes if something hangs
+      clearTimeout(setStreaming._safetyTimer);
+      setStreaming._safetyTimer = setTimeout(() => {
+        if (state.streaming) {
+          try { state.abort?.abort(); } catch {}
+          setStreaming(false);
+          pushActivity("fail", "Stopped: response timed out / stuck");
+          toast("Unlocked — previous reply got stuck");
+          const chat = activeChat();
+          const last = chat?.messages?.[chat.messages.length - 1];
+          if (last && last.role === "assistant" && last.streaming) {
+            last.streaming = false;
+            if (!last.content) last.content = "_(Stopped — connection stuck. Click Retry or send again.)_";
+            saveChats();
+            renderMessages();
+          }
+        }
+      }, 180000);
+    }
+  }
+
+  function forceUnlockUI() {
+    try { state.abort?.abort(); } catch {}
+    state.abort = null;
+    setStreaming(false);
+    // clear any assistant streaming flags
+    for (const c of state.chats) {
+      for (const m of c.messages || []) {
+        if (m.streaming) m.streaming = false;
+      }
+    }
+    saveChats();
+    renderMessages();
+    const backdrop = $("#sidebar-backdrop");
+    if (backdrop) backdrop.hidden = true;
+    const sidebar = $("#sidebar");
+    if (sidebar) sidebar.classList.remove("open");
+    // close blocking modals
+    const sm = $("#settings-modal");
+    if (sm) sm.hidden = true;
+    const rm = $("#rename-modal");
+    if (rm) rm.hidden = true;
+    toast("UI unlocked");
   }
 
   function maybeAutoOpenArtifact(text) {
@@ -800,7 +851,7 @@
     $("#key-status").textContent = s.api_key_set ? `(set: ${s.api_key_masked})` : "(not set)";
     $("#set-temp").value = s.temperature ?? 0.7;
     $("#temp-val").textContent = String(s.temperature ?? 0.7);
-    $("#set-max-tokens").value = s.max_tokens ?? 8192;
+    $("#set-max-tokens").value = s.max_tokens ?? 1024;
     $("#set-system").value = s.system_prompt || "";
     const ar = $("#set-auto-route");
     if (ar) ar.checked = s.auto_route !== false;
@@ -1177,7 +1228,11 @@
     });
 
     $("#btn-stop").addEventListener("click", () => {
-      state.abort?.abort();
+      try { state.abort?.abort(); } catch {}
+      // Always unlock UI even if abort missing
+      setTimeout(() => {
+        if (state.streaming) forceUnlockUI();
+      }, 100);
     });
 
     $("#suggestions").addEventListener("click", (e) => {
@@ -1237,6 +1292,9 @@
       const next = document.body.dataset.theme === "dark" ? "light" : "dark";
       applyTheme(next);
     });
+    // Emergency unlock: double-click brand
+    const brand = document.querySelector(".brand-pill, .empty-logo, .brand-name");
+    if (brand) brand.addEventListener("dblclick", forceUnlockUI);
     const agentBtn = $("#btn-agent");
     if (agentBtn) {
       agentBtn.addEventListener("click", () => {
@@ -1411,6 +1469,7 @@
         $("#settings-modal").hidden = true;
         $("#rename-modal").hidden = true;
         $("#model-menu").hidden = true;
+        if (state.streaming) forceUnlockUI();
       }
     });
   }
@@ -1447,12 +1506,23 @@
   async function boot() {
     applyTheme(localStorage.getItem(THEME_KEY) || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
     loadChats();
+    // Clear any stuck streaming flags from previous session
+    for (const c of state.chats) {
+      for (const m of (c.messages || [])) m.streaming = false;
+    }
+    // Migrate retired model id
+    if (!state.selectedModel || state.selectedModel.includes("claude-3.5-sonnet")) {
+      state.selectedModel = "auto";
+      localStorage.setItem(MODEL_KEY, "auto");
+    }
     if (!state.chats.length) {
-      // start with empty workspace (no forced chat)
       state.activeId = null;
     }
+    state.streaming = false;
+    state.abort = null;
     bindEvents();
     render();
+    setStreaming(false);
 
     try {
       state.providers = await apiGet("/api/providers");

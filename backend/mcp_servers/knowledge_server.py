@@ -11,7 +11,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-DB = Path(os.environ.get("AURORA_KB_DB", "/home/user/aurora/data/aurora_kb.sqlite3")).resolve()
+DB = Path(os.environ.get("AURORA_KB_DB", str(Path(__file__).resolve().parents[2] / "data" / "aurora_kb.sqlite3"))).resolve()
 DB.parent.mkdir(parents=True, exist_ok=True)
 
 mcp = FastMCP("aurora-knowledge")

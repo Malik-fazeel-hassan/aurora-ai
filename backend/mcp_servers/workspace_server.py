@@ -10,7 +10,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-ROOT = Path(os.environ.get("AURORA_WORKSPACE", "/home/user/aurora/workspace")).resolve()
+ROOT = Path(os.environ.get("AURORA_WORKSPACE", str(Path(__file__).resolve().parents[2] / "workspace"))).resolve()
 ROOT.mkdir(parents=True, exist_ok=True)
 
 mcp = FastMCP("aurora-workspace")

@@ -504,7 +504,10 @@ body[data-theme="dark"] .icon-sun { display: none; }
   padding: 0 14px calc(12px + var(--safe-b));
   background: linear-gradient(transparent, color-mix(in srgb, var(--bg) 88%, transparent) 28%);
 }
-.stop-row { display: flex; justify-content: center; margin-bottom: 8px; }
+.stop-row { display: flex; justify-content: center; margin-bottom: 8px; position: relative; z-index: 30; }
+.stop-row[hidden] { display: none !important; }
+.btn-stop { cursor: pointer; z-index: 31; position: relative; }
+body.ui-locked .composer-inner { opacity: 0.95; }
 .btn-stop {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 9px 14px; border-radius: 999px;

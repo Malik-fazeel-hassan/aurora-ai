@@ -71,7 +71,7 @@ DEFAULT_SETTINGS = {
     "default_model": "anthropic/claude-sonnet-4.6",
     "system_prompt": DEFAULT_SYSTEM,
     "temperature": 0.7,
-    "max_tokens": 8192,
+    "max_tokens": 1024,
     "active_profile": "openrouter",
     "profiles": {},
     "auto_route": True,

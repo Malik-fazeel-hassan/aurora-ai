@@ -4,6 +4,8 @@ Aurora agent tools — sandboxed utilities the model can call.
 
 from __future__ import annotations
 
+import os
+
 import ast
 import json
 import math
@@ -31,8 +33,15 @@ except Exception:  # pragma: no cover
     def redact_secrets(text: str):
         return text
 
-WORKSPACE = Path("/home/user/aurora/workspace")
-WORKSPACE.mkdir(parents=True, exist_ok=True)
+import os
+_APP_ROOT = Path(__file__).resolve().parent.parent
+WORKSPACE = Path(os.environ.get("AURORA_WORKSPACE", str(_APP_ROOT / "workspace"))).resolve()
+try:
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Fallback for restricted containers
+    WORKSPACE = Path(os.environ.get("TMPDIR", "/tmp")) / "aurora-workspace"
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 # Safe math operators for calculator
 _OPS = {

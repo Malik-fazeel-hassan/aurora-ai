@@ -5,7 +5,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=7860 \
     HOST=0.0.0.0 \
-    PYTHONPATH=/app/backend
+    PYTHONPATH=/app/backend \
+    AURORA_WORKSPACE=/app/workspace \
+    AURORA_KB_DB=/app/data/aurora_kb.sqlite3
 
 WORKDIR /app
 

@@ -4,7 +4,7 @@
   "default_model": "auto",
   "system_prompt": "You are Aurora, a helpful AI assistant.",
   "temperature": 0.7,
-  "max_tokens": 8192,
+  "max_tokens": 1024,
   "active_profile": "openrouter",
   "auto_route": true,
   "prefer_free_on_fail": true,

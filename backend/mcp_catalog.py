@@ -20,7 +20,7 @@ from typing import Any
 
 BACKEND = Path(__file__).resolve().parent
 WS = str((BACKEND.parent / "workspace").resolve())
-HOME = "/home/user"
+HOME = str(Path.home())
 PY = "python3"
 
 # category helpers
@@ -526,7 +526,7 @@ def build_catalog() -> list[dict[str, Any]]:
             "id": "mcp_filesystem_home",
             "name": "Filesystem (home)",
             "category": CAT["files"],
-            "description": "Official filesystem MCP scoped to /home/user.",
+            "description": "Official filesystem MCP scoped to user home.",
             **_p("npx", ["-y", "@modelcontextprotocol/server-filesystem", HOME], priority=2),
         }
     )
